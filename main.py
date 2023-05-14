@@ -5,18 +5,45 @@ from mediapipe.framework.formats import landmark_pb2
 import time
 import numpy as np
 import mediapipe as mp
+import argparse
 import queue
+import pythonosc
+from pythonosc import udp_client
 
-FRAME_TIME = 10
-VISUALIZE = True
+parser = argparse.ArgumentParser()
+parser.add_argument("--ip", default="127.0.0.1",
+                    help="The ip of the OSC server")
+parser.add_argument("--port", type=int, default=9000,
+                    help="The port the OSC server is listening on")
+parser.add_argument("--frametime", type=int, default=100,
+                    help="Amount of time to wait between every frame")
+parser.add_argument("--visualize", type=bool, default=True,
+                    help="Whether or not to visualize the pose tracking output")
+parser.add_argument("--cam", type=int, default=0,
+                    help="The index of the video (/dev/videoX)")
+args = parser.parse_args()
+
+image_queue = queue.Queue()
+osc_client = udp_client.SimpleUDPClient(args.ip, args.port)
+
+BaseOptions = mp.tasks.BaseOptions
+PoseLandmarker = mp.tasks.vision.PoseLandmarker
+PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
+
+options = PoseLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path='pose_landmarker.task'),
+    running_mode=VisionRunningMode.LIVE_STREAM,
+    result_callback=result_callback,
+)
+detector = PoseLandmarker.create_from_options(options)
 
 def draw_landmarks_on_image(rgb_image, detection_result):
-    pose_landmarks_list = detection_result.pose_landmarks
     annotated_image = np.copy(rgb_image)
 
     # Loop through the detected poses to visualize.
-    for idx in range(len(pose_landmarks_list)):
-        pose_landmarks = pose_landmarks_list[idx]
+    for pose_landmarks in detection_result.pose_landmarks:
+        print(len(pose_landmarks))
 
         # Draw the pose landmarks.
         pose_landmarks_proto = landmark_pb2.NormalizedLandmarkList()
@@ -30,34 +57,33 @@ def draw_landmarks_on_image(rgb_image, detection_result):
             solutions.drawing_styles.get_default_pose_landmarks_style())
     return annotated_image
 
-image_queue = queue.Queue()
-
 def result_callback(detection_result, image, timestamp):
-    # STEP 5: Process the detection result. In this case, visualize it.
-    annotated_image = draw_landmarks_on_image(image.numpy_view(), detection_result)
-    if VISUALIZE:
+    if args.visualize:
+        annotated_image = draw_landmarks_on_image(
+            image.numpy_view(), detection_result)
         image_queue.put(annotated_image)
 
-BaseOptions = mp.tasks.BaseOptions
-PoseLandmarker = mp.tasks.vision.PoseLandmarker
-PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
+def send_osc_messages():
+    tracker_addresses = {
+        "head": "/tracking/trackers/head",
+        "left_hand": "/tracking/trackers/2",
+        "right_hand": "/tracking/trackers/3",
+        "hips": "/tracking/trackers/4",
+        "left_foot": "/tracking/trackers/5",
+        "right_foot": "/tracking/trackers/6",
+        "spine": "/tracking/trackers/7",
+        "chest": "/tracking/trackers/8"
+    }
 
-options = PoseLandmarkerOptions(
-    base_options = BaseOptions(model_asset_path='pose_landmarker.task'),
-    running_mode = VisionRunningMode.LIVE_STREAM,
-    result_callback = result_callback,
-)
-detector = PoseLandmarker.create_from_options(options)
 
 def track_video():
     prev_timestamp = 0
-    video = cv2.VideoCapture(7)
+    video = cv2.VideoCapture(args.cam)
 
     while True:
         # Get frame from video feed
-        ok,frame=video.read()
-        if not ok: 
+        ok, frame = video.read()
+        if not ok:
             break
 
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
@@ -67,17 +93,18 @@ def track_video():
         prev_timestamp = timestamp
 
         detection_result = detector.detect_async(image, timestamp)
- 
-        if VISUALIZE:
+
+        if args.visualize:
             try:
                 image = image_queue.get_nowait()
                 cv2.imshow("Image", image)
-                cv2.waitKey(FRAME_TIME)
+                cv2.waitKey(args.frametime)
                 continue
             except queue.Empty:
                 pass
 
-        time.sleep(1 / FRAME_TIME)
+        time.sleep(1 / args.frametime)
+
 
 if __name__ == "__main__":
     track_video()
